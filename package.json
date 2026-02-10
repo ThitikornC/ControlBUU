@@ -1,0 +1,14 @@
+{
+  "name": "sonoff-controller",
+  "version": "1.0.0",
+  "description": "Sonoff Tasmota MQTT Controller - เปิด/ปิดตาม Check-in/Check-out",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.4",
+    "mongodb": "^6.3.0",
+    "mqtt": "^5.3.0"
+  }
+}
