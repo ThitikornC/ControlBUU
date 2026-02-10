@@ -1,8 +1,31 @@
+const http = require('http');
 const mqtt = require('mqtt');
 const { MongoClient } = require('mongodb');
 
 // โหลด .env
 require('dotenv').config();
+
+// ===================== HTTP Health Check (Railway ต้องการ) =====================
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    const status = {
+      status: 'running',
+      mqtt: mqttClient ? (mqttClient.connected ? 'connected' : 'disconnected') : 'not initialized',
+      db: db ? 'connected' : 'not connected',
+      rooms: Object.entries(roomState).map(([r, s]) => `${r}: ${s}`),
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString()
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(status, null, 2));
+  } else {
+    res.writeHead(404);
+    res.end('Not Found');
+  }
+}).listen(PORT, () => {
+  console.log(`🌐 Health check server listening on port ${PORT}`);
+});
 
 // ===================== CONFIG (จาก .env) =====================
 const MQTT_BROKER = process.env.MQTT_BROKER || 'mqtts://mosquitto-broker-production-2037.up.railway.app';
