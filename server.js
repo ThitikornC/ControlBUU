@@ -8,6 +8,27 @@ require('dotenv').config();
 // ===================== HTTP Health Check (Railway ต้องการ) =====================
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
+  // Simple health and room-state endpoints. Allow CORS so front-end can fetch room state.
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (req.url === '/room-state') {
+    const payload = {
+      success: true,
+      roomState: roomState // mapping: { 'ห้อง101โถงชั้น1': 'ON', ... }
+    };
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload, null, 2));
+    return;
+  }
+
   if (req.url === '/health' || req.url === '/') {
     const status = {
       status: 'running',
@@ -19,10 +40,11 @@ http.createServer((req, res) => {
     };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(status, null, 2));
-  } else {
-    res.writeHead(404);
-    res.end('Not Found');
+    return;
   }
+
+  res.writeHead(404);
+  res.end('Not Found');
 }).listen(PORT, () => {
   console.log(`🌐 Health check server listening on port ${PORT}`);
 });
