@@ -13,7 +13,7 @@ http.createServer((req, res) => {
       status: 'running',
       mqtt: mqttClient ? (mqttClient.connected ? 'connected' : 'disconnected') : 'not initialized',
       db: db ? 'connected' : 'not connected',
-      rooms: Object.entries(roomState).map(([r, s]) => `${r}: ${s}`),
+      rooms: Object.entries(roomDesiredState).map(([r, s]) => `${r}: ${s} (actual: ${roomState[r] || '?'})`),
       uptime: process.uptime(),
       timestamp: new Date().toISOString()
     };
@@ -34,6 +34,9 @@ const MQTT_OPTIONS = {
   reconnectPeriod: 5000,
   connectTimeout: 30000,
 };
+
+// อนุญาตให้เปิดก่อนเวลา (นาที) ช่วง early allowance
+const EARLY_ALLOWANCE_MIN = parseInt(process.env.EARLY_ALLOWANCE_MIN) || 15;
 
 // ใส่ username/password ถ้ามี
 if (process.env.MQTT_USERNAME) MQTT_OPTIONS.username = process.env.MQTT_USERNAME;
@@ -66,10 +69,15 @@ const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL) || 10000;
 let db = null;
 let mqttClient = null;
 
-// เก็บสถานะ: ห้องไหนเปิดอยู่ เพื่อไม่ส่งซ้ำ
+// เก็บสถานะที่ต้องการ (desired state) แยกจาก MQTT feedback
+const roomDesiredState = {};
+// เก็บสถานะจริงจาก MQTT feedback (สำหรับ log เท่านั้น)
 const roomState = {};
 // เก็บ timer สำหรับปิดอัตโนมัติ
 const roomTimers = {};
+// Cooldown: ป้องกันสั่ง ON/OFF ถี่เกินไป (มิลลิวินาที)
+const COMMAND_COOLDOWN = 5000;
+const lastCommandTime = {};
 
 // ===================== MQTT =====================
 function connectMQTT() {
@@ -125,17 +133,26 @@ function turnOn(room) {
     return;
   }
 
-  if (roomState[room] === 'ON') {
-    return; // เปิดอยู่แล้ว ไม่ต้องส่งซ้ำ
+  // ถ้า desired state เป็น ON อยู่แล้ว ไม่ต้องส่งซ้ำ
+  if (roomDesiredState[room] === 'ON') {
+    return;
   }
+
+  // Cooldown: ป้องกันสั่งถี่เกินไป
+  const now = Date.now();
+  if (lastCommandTime[room] && (now - lastCommandTime[room]) < COMMAND_COOLDOWN) {
+    return;
+  }
+  lastCommandTime[room] = now;
+  roomDesiredState[room] = 'ON';
 
   const topic = `cmnd/${device}/Power`;
   mqttClient.publish(topic, 'ON', { qos: 1 }, (err) => {
     if (err) {
       console.error(`❌ ส่งคำสั่งเปิดล้มเหลว ${room}:`, err.message);
+      roomDesiredState[room] = null; // reset เพื่อให้ลองใหม่
     } else {
       console.log(`🟢 เปิด ${room} (${device})`);
-      roomState[room] = 'ON';
     }
   });
 }
@@ -148,17 +165,26 @@ function turnOff(room) {
     return;
   }
 
-  if (roomState[room] === 'OFF') {
-    return; // ปิดอยู่แล้ว ไม่ต้องส่งซ้ำ
+  // ถ้า desired state เป็น OFF อยู่แล้ว ไม่ต้องส่งซ้ำ
+  if (roomDesiredState[room] === 'OFF') {
+    return;
   }
+
+  // Cooldown: ป้องกันสั่งถี่เกินไป
+  const now = Date.now();
+  if (lastCommandTime[room] && (now - lastCommandTime[room]) < COMMAND_COOLDOWN) {
+    return;
+  }
+  lastCommandTime[room] = now;
+  roomDesiredState[room] = 'OFF';
 
   const topic = `cmnd/${device}/Power`;
   mqttClient.publish(topic, 'OFF', { qos: 1 }, (err) => {
     if (err) {
       console.error(`❌ ส่งคำสั่งปิดล้มเหลว ${room}:`, err.message);
+      roomDesiredState[room] = null; // reset เพื่อให้ลองใหม่
     } else {
       console.log(`🔴 ปิด ${room} (${device})`);
-      roomState[room] = 'OFF';
     }
   });
 }
@@ -194,24 +220,33 @@ async function checkBookings() {
     for (const [room, device] of Object.entries(ROOM_DEVICE_MAP)) {
       // หา booking ที่ active สำหรับห้องนี้
       const activeBooking = bookings.find(b => {
-        if (b.room !== room) return false;
+        // Strip ▼ suffix from room name (UI dropdown artifact)
+        const bookingRoom = (b.room || '').replace(/\s*▼\s*/, '').trim();
+        if (bookingRoom !== room) return false;
         const [startH, startM] = b.startTime.split(':').map(Number);
         const [endH, endM] = b.endTime.split(':').map(Number);
         const startSecs = startH * 3600 + startM * 60;
         const endSecs = endH * 3600 + endM * 60;
-        return currentSecs >= startSecs && currentSecs <= endSecs;
+        const earlySecs = EARLY_ALLOWANCE_MIN * 60;
+        return currentSecs >= (startSecs - earlySecs) && currentSecs <= endSecs;
       });
 
       if (activeBooking && activeBooking.firstCheckIn) {
         // ✅ มี booking + check-in แล้ว → เปิด
         turnOn(room);
 
-        // ตั้ง timer ปิดอัตโนมัติเมื่อหมดเวลา
+        // คำนวณเวลาที่เหลือจนหมด booking ปัจจุบัน
         const [endH, endM] = activeBooking.endTime.split(':').map(Number);
         const endSecs = endH * 3600 + endM * 60;
         const remainingSecs = endSecs - currentSecs;
 
-        if (remainingSecs > 0 && !roomTimers[room]) {
+        // เคลียร์ timer เก่า (อาจเป็นของ booking ก่อนหน้า) แล้วตั้งใหม่เสมอ
+        if (roomTimers[room]) {
+          clearTimeout(roomTimers[room]);
+          delete roomTimers[room];
+        }
+
+        if (remainingSecs > 0) {
           console.log(`⏱️ ตั้งเวลาปิด ${room} อีก ${Math.floor(remainingSecs / 60)} นาที ${remainingSecs % 60} วินาที`);
           roomTimers[room] = setTimeout(() => {
             console.log(`⏰ หมดเวลา! ปิด ${room}`);
