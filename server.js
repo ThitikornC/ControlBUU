@@ -230,8 +230,10 @@ async function checkBookings() {
 
   try {
     const now = new Date();
-    const today = now.toISOString().split('T')[0];
-    const currentSecs = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+    // ใช้ Bangkok timezone (UTC+7)
+    const bangkokNow = new Date(now.getTime() + (7 * 60 * 60 * 1000));
+    const today = bangkokNow.toISOString().split('T')[0];
+    const currentSecs = bangkokNow.getUTCHours() * 3600 + bangkokNow.getUTCMinutes() * 60 + bangkokNow.getUTCSeconds();
 
     // ดึง booking ของวันนี้ทุกห้อง
     const bookings = await db.collection(BOOKINGS_COLLECTION).find({
