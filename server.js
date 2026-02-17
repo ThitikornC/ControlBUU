@@ -64,6 +64,19 @@ http.createServer((req, res) => {
             // อัปเดต desired state ทันที
             if (cmd === 'ON') roomDesiredState[room] = 'ON';
             else if (cmd === 'OFF') roomDesiredState[room] = 'OFF';
+
+            // ตั้ง manual override เพื่อป้องกัน checkBookings() ไปทับ
+            const overrideUntil = Date.now() + MANUAL_OVERRIDE_DURATION;
+            manualOverride[room] = { until: overrideUntil, state: cmd };
+            console.log(`🔒 Manual override ${room} → ${cmd} จนถึง ${new Date(overrideUntil).toISOString()} (${MANUAL_OVERRIDE_DURATION / 60000} นาที)`);
+
+            // ถ้า manual เปิด: เคลียร์ timer ปิดอัตโนมัติเก่า
+            if (cmd === 'ON' && roomTimers[room]) {
+              clearTimeout(roomTimers[room]);
+              delete roomTimers[room];
+              console.log(`🔓 เคลียร์ auto-off timer ของ ${room} เนื่องจาก manual ON`);
+            }
+
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, room, action: cmd, device }));
           }
@@ -81,7 +94,7 @@ http.createServer((req, res) => {
       status: 'running',
       mqtt: mqttClient ? (mqttClient.connected ? 'connected' : 'disconnected') : 'not initialized',
       db: db ? 'connected' : 'not connected',
-      rooms: Object.entries(roomDesiredState).map(([r, s]) => `${r}: ${s} (actual: ${roomState[r] || '?'})`),
+      rooms: Object.entries(roomDesiredState).map(([r, s]) => `${r}: ${s} (actual: ${roomState[r] || '?'})${manualOverride[r] && Date.now() < manualOverride[r].until ? ' [MANUAL OVERRIDE]' : ''}`),
       uptime: process.uptime(),
       timestamp: new Date().toISOString()
     };
@@ -147,6 +160,11 @@ const roomTimers = {};
 // Cooldown: ป้องกันสั่ง ON/OFF ถี่เกินไป (มิลลิวินาที)
 const COMMAND_COOLDOWN = 5000;
 const lastCommandTime = {};
+
+// Manual override: เก็บเวลาที่ user กด manual toggle
+// เมื่อ manual toggle → checkBookings จะไม่เขียนทับจนกว่าจะหมดเวลา override
+const manualOverride = {}; // { room: { until: timestamp, state: 'ON'|'OFF' } }
+const MANUAL_OVERRIDE_DURATION = parseInt(process.env.MANUAL_OVERRIDE_MIN || '30') * 60 * 1000; // default 30 นาที
 
 // ===================== MQTT =====================
 function connectMQTT() {
@@ -301,6 +319,18 @@ async function checkBookings() {
         const earlySecs = EARLY_ALLOWANCE_MIN * 60;
         return currentSecs >= (startSecs - earlySecs) && currentSecs <= endSecs;
       });
+
+      // ===== ตรวจสอบ manual override =====
+      const override = manualOverride[room];
+      if (override && Date.now() < override.until) {
+        // Manual override ยังไม่หมดเวลา → ข้ามห้องนี้ไม่ให้ auto logic ไปทับ
+        // (log เฉพาะครั้งแรกของแต่ละรอบ)
+        continue;
+      } else if (override && Date.now() >= override.until) {
+        // Override หมดอายุ → ลบออก ให้กลับมาเป็น auto
+        console.log(`🔓 Manual override หมดอายุ: ${room}`);
+        delete manualOverride[room];
+      }
 
       if (activeBooking && activeBooking.firstCheckIn) {
         // ✅ มี booking + check-in แล้ว → เปิด
