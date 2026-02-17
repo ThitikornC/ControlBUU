@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   // Simple health and room-state endpoints. Allow CORS so front-end can fetch room state.
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') {
@@ -26,6 +26,53 @@ http.createServer((req, res) => {
     };
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  // POST /toggle — manual toggle Sonoff device
+  if (req.url === '/toggle' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { room, action } = JSON.parse(body);
+        if (!room || !action) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Missing room or action' }));
+          return;
+        }
+        const device = ROOM_DEVICE_MAP[room];
+        if (!device) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: `No device for room: ${room}` }));
+          return;
+        }
+        if (!mqttClient || !mqttClient.connected) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'MQTT not connected' }));
+          return;
+        }
+
+        const cmd = action.toUpperCase() === 'ON' ? 'ON' : action.toUpperCase() === 'OFF' ? 'OFF' : 'TOGGLE';
+        const topic = `cmnd/${device}/Power`;
+        mqttClient.publish(topic, cmd, { qos: 1 }, (err) => {
+          if (err) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
+          } else {
+            console.log(`🎮 Manual ${cmd} → ${room} (${device})`);
+            // อัปเดต desired state ทันที
+            if (cmd === 'ON') roomDesiredState[room] = 'ON';
+            else if (cmd === 'OFF') roomDesiredState[room] = 'OFF';
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, room, action: cmd, device }));
+          }
+        });
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON' }));
+      }
+    });
     return;
   }
 
